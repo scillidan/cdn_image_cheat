@@ -1,0 +1,74 @@
+name: Compress Assets and Deploy
+on:
+  push:
+    branches:
+      - main
+permissions:
+  contents: write
+jobs:
+  compress_upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      - name: Set up ImageMagick and ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y imagemagick librsvg2-bin ffmpeg
+      - name: Set ImageMagick resource limits
+        run: |
+          echo "resource limits"
+          echo "memory: 2GiB"
+          echo "map: 4GiB"
+        env:
+          MAGICK_MEMORY_LIMIT: 2GiB
+          MAGICK_MAP_LIMIT: 4GiB
+      - name: Compress JPG/PNG/SVG to WEBP
+        run: |
+          mkdir -p webp
+          shopt -s nullglob
+          for img in *.jpg *.jpeg *.png *.svg; do
+            if [ -f "$img" ]; then
+              filetype=$(file --brief --mime-type "$img")
+              if [[ "$filetype" == "image/jpeg" || "$filetype" == "image/png" ]]; then
+                convert "$img" -resize 800x -quality 80 "webp/${img%.*}.webp"
+              elif [[ "$filetype" == "image/svg+xml" ]]; then
+                tmp_png="tmp_${img%.*}.png"
+                rsvg-convert -w 800 -o "$tmp_png" "$img"
+                convert "$tmp_png" -quality 80 "webp/${img%.*}.webp"
+                rm "$tmp_png"
+              else
+                echo "Skipping unsupported file type: $img ($filetype)"
+              fi
+            fi
+          done
+      - name: Convert GIF to MP4
+        run: |
+          mkdir -p mp4
+          shopt -s nullglob
+          for gif in *.gif; do
+            if [ -f "$gif" ]; then
+              filename="${gif%.*}"
+              ffmpeg -i "$gif" -movflags faststart -pix_fmt yuv420p -vf "fps=30,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:v libx264 -crf 23 -preset veryslow "mp4/${filename}.mp4"
+            fi
+          done
+      - name: Convert MP4 to WEBP thumbnail (from GIFs)
+        run: |
+          mkdir -p webp
+          shopt -s nullglob
+          for mp4file in mp4/*.mp4; do
+            filename=$(basename "${mp4file%.*}")
+            ffmpeg -i "$mp4file" -vframes 1 "webp/${filename}.webp"
+          done
+      - name: Prepare deployment directory
+        run: |
+          mkdir -p deploy
+          cp -r ./*.webp deploy/
+          cp -r webp/* deploy/
+          cp -r mp4/* deploy/
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./deploy
+          publish_branch: gh-pages
